@@ -254,6 +254,10 @@ impl<F: ExtensionOf<BaseField>, EvalOrder> IntoIterator
 mod tests {
     use std::iter::zip;
 
+    use icicle_core::ntt::{NTTConfig, NTTDir, Ordering};
+    use icicle_cuda_runtime::device_context::DeviceContext;
+    use icicle_cuda_runtime::memory::HostSlice;
+    use icicle_m31::dcct::{dcct, get_dcct_root_of_unity, initialize_dcct_domain, release_domain};
     use num_traits::One;
 
     use crate::core::backend::cpu::CpuCirclePoly;
@@ -261,6 +265,60 @@ mod tests {
     use crate::core::fields::m31::BaseField;
     use crate::core::fields::qm31::SecureField;
     use crate::core::poly::circle::CanonicCoset;
+    use icicle_m31::field::ScalarField;
+    use icicle_core::traits::FieldImpl;
+
+    #[test]
+    fn test_evaluate_icicle() {
+        const LOG: u32 = 6;
+
+        let domain = CanonicCoset::new(LOG).circle_domain();
+        let poly = CpuCirclePoly::new((0..1<<LOG).map(BaseField::from).collect());
+
+        // let evaluation = poly.clone().evaluate(domain);
+        let evaluation = poly.clone().evaluate(domain).bit_reverse();
+
+        for (_i, value) in evaluation.values.iter().enumerate() {
+            // println!("{:#08x} {}", value.0, _i);
+            println!("{:#08x},", value.0);
+        }
+
+    }
+
+    #[test]
+    fn test_interpolate_icicle() {
+        for log in (4..6).chain(8..20)  {
+            println!("LOG: {}", log);
+            let rou = get_dcct_root_of_unity(log);
+            initialize_dcct_domain(rou, &DeviceContext::default()).unwrap();
+
+            let icicle_evals: Vec<ScalarField> = (0..1<<log).map(|x| ScalarField::from([x])).collect();
+            let mut icicle_coeffs = vec![ScalarField::zero(); 1 << log];
+            let mut cfg = NTTConfig::default();
+            cfg.ordering = Ordering::kMN;
+            dcct(
+                HostSlice::from_slice(&icicle_evals),
+                NTTDir::kInverse,
+                &cfg,
+                HostSlice::from_mut_slice(&mut icicle_coeffs),
+            ).unwrap();
+
+            let poly = CpuCirclePoly::new((0..1<<log).map(BaseField::from).collect());
+            let domain = CanonicCoset::new(log).circle_domain();
+            let mut evals = poly.clone().evaluate(domain);
+            evals.values = (0..1<<log).map(BaseField::from).collect();
+
+            let interpolated_poly = evals.interpolate();
+
+            for (_i, (value, icicle_value)) in interpolated_poly.coeffs.iter().zip(icicle_coeffs).enumerate() {
+                let limbs: [u32; 1] = icicle_value.into();
+                // println!("{:#08x}, {:#08x} {}", value.0, limbs[0], _i);
+                assert_eq!(value.0, limbs[0]);
+            }
+            release_domain(&DeviceContext::default()).unwrap();
+        }
+
+    }
 
     #[test]
     fn test_eval_at_point_with_4_coeffs() {
